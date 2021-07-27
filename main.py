@@ -1,7 +1,7 @@
 from google.cloud import bigquery, secretmanager
 from google.cloud.exceptions import NotFound
 from datetime import datetime, date, timedelta
-import requests
+import requests as rq
 import logging
 import json
 import base64
@@ -53,7 +53,7 @@ def exist_dataset_table(client, table_id, dataset_id, project_id, schema, cluste
     except NotFound:
         dataset_ref = "{}.{}".format(project_id, dataset_id)
         dataset = bigquery.Dataset(dataset_ref)
-        dataset.location = "US"
+        dataset.location = "EU"
         dataset = client.create_dataset(dataset)  # Make an API request.
         logger.info("Created dataset {}.{}".format(
             client.project, dataset.dataset_id))
@@ -95,6 +95,40 @@ def insert_rows_bq(client, table_id, dataset_id, project_id, data):
 
     logger.info("Success uploaded to table {}".format(table.table_id))
 
+# Function to find the string between two strings or characters
+
+
+def find_between(s, first, last):
+    try:
+        start = s.index(first) + len(first)
+        end = s.index(last, start)
+        return s[start:end]
+    except ValueError:
+        return ""
+
+# Function to check how close you are to the FB Rate Limit
+
+
+def check_limit(account_number, access_token):
+    try:
+        check = rq.get('https://graph.facebook.com/v11.0/act_' +
+                       account_number+'/insights?access_token='+access_token)
+        business_use_case_usage = check.headers['x-business-use-case-usage']
+
+        call = float(find_between(
+            check.headers['x-business-use-case-usage'], 'call_count":', ','))
+        cpu = float(find_between(
+            check.headers['x-business-use-case-usage'], 'total_cputime":', ','))
+        total = float(find_between(
+            check.headers['x-business-use-case-usage'], 'total_time":', ','))
+
+        usage = max(call, cpu, total)
+        print(f'usage is: {usage}')
+        return usage
+    except ValueError as e:
+        print(e)
+        return 75
+
 
 def get_facebook_data(event, context):
 
@@ -103,6 +137,7 @@ def get_facebook_data(event, context):
 
     if 'date' in event['attributes']:
         yesterday = event['attributes']['date'].strftime('%Y-%m-%d')
+
     else:
         yesterday = date.today() - timedelta(1)
 
@@ -153,11 +188,14 @@ def get_facebook_data(event, context):
 
         async_job = account.get_insights(**args)
         async_job.api_get()
-        while async_job[AdReportRun.Field.async_status] != "Job Completed":
-            time.sleep(5)
+        while async_job[AdReportRun.Field.async_percent_completion] < 100 or async_job[AdReportRun.Field.async_status] != 'Job Completed':
+            if (check_limit(account_id, access_token) > 75):
+                print('75% Rate Limit Reached. Cooling Time 5 Minutes.')
+                logging.debug(
+                    '75% Rate Limit Reached. Cooling Time 5 Minutes.')
+                time.sleep(300)
             async_job.api_get()
 
-        time.sleep(5)
         resp_data = async_job.get_result()
 
     except Exception as e:
