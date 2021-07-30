@@ -15,12 +15,10 @@ from facebook_business.adobjects.adreportrun import AdReportRun
 
 logger = logging.getLogger()
 
-schema_exchange_rate = [
-    bigquery.SchemaField("date", "DATE", mode="REQUIRED"),
-    bigquery.SchemaField("currencies", "STRING", mode="REQUIRED"),
-    bigquery.SchemaField("rate", "FLOAT", mode="REQUIRED")
-]
 
+"""
+Defines the schema for the bigquery table
+"""
 schema_facebook_stat = [
     bigquery.SchemaField("date", "DATE", mode="REQUIRED"),
     bigquery.SchemaField("ad_id", "STRING", mode="REQUIRED"),
@@ -43,9 +41,29 @@ schema_facebook_stat = [
 
 clustering_fields_facebook = ['campaign_id', 'campaign_name']
 
+"""
+Defines the fields that will be fetched from the Facebook API
+"""
+fields = [
+    AdsInsights.Field.account_id,
+    AdsInsights.Field.campaign_id,
+    AdsInsights.Field.campaign_name,
+    AdsInsights.Field.adset_name,
+    AdsInsights.Field.adset_id,
+    AdsInsights.Field.ad_name,
+    AdsInsights.Field.ad_id,
+    AdsInsights.Field.spend,
+    AdsInsights.Field.impressions,
+    AdsInsights.Field.clicks,
+    AdsInsights.Field.actions,
+    AdsInsights.Field.conversions
+]
+
 
 def exist_dataset_table(client, table_id, dataset_id, project_id, schema, clustering_fields=None):
-
+    """
+    Check if a table exists in a given dataset
+    """
     try:
         dataset_ref = "{}.{}".format(project_id, dataset_id)
         client.get_dataset(dataset_ref)  # Make an API request.
@@ -84,7 +102,9 @@ def exist_dataset_table(client, table_id, dataset_id, project_id, schema, cluste
 
 
 def insert_rows_bq(client, table_id, dataset_id, project_id, data):
-
+    """
+    Insert rows into BigQuery table
+    """
     table_ref = "{}.{}.{}".format(project_id, dataset_id, table_id)
     table = client.get_table(table_ref)
 
@@ -99,6 +119,9 @@ def insert_rows_bq(client, table_id, dataset_id, project_id, data):
 
 
 def find_between(s, first, last):
+    """
+    Find string between two strings or characters
+    """
     try:
         start = s.index(first) + len(first)
         end = s.index(last, start)
@@ -110,6 +133,10 @@ def find_between(s, first, last):
 
 
 def check_limit(account_number, access_token):
+    """ 
+    Check the capacity that the api endpoint has reached and returns the value.
+    In case of error it returns 75
+    """
     try:
         check = rq.get('https://graph.facebook.com/v11.0/act_' +
                        account_number+'/insights?access_token='+access_token)
@@ -131,7 +158,9 @@ def check_limit(account_number, access_token):
 
 
 def get_facebook_data(event, context):
-
+    """
+    Main function to get the data from Facebook API
+    """
     pubsub_message = base64.b64decode(event['data']).decode('utf-8')
     bigquery_client = bigquery.Client()
 
@@ -161,20 +190,7 @@ def get_facebook_data(event, context):
 
         account = AdAccount('act_'+str(account_id))
         args = dict(
-            fields=[
-                AdsInsights.Field.account_id,
-                AdsInsights.Field.campaign_id,
-                AdsInsights.Field.campaign_name,
-                AdsInsights.Field.adset_name,
-                AdsInsights.Field.adset_id,
-                AdsInsights.Field.ad_name,
-                AdsInsights.Field.ad_id,
-                AdsInsights.Field.spend,
-                AdsInsights.Field.impressions,
-                AdsInsights.Field.clicks,
-                AdsInsights.Field.actions,
-                AdsInsights.Field.conversions
-            ],
+            fields=fields,
             params={
                 'time_range': {
                     'since': yesterday.strftime("%Y-%m-%d"),
@@ -207,6 +223,20 @@ def get_facebook_data(event, context):
     for item in resp_data:
         data = dict(item)
         results.append(data)
+    data = prepare_data(results)
+
+    if exist_dataset_table(bigquery_client, table_id, dataset_id, project_id, schema_facebook_stat, clustering_fields_facebook) == 'ok':
+
+        insert_rows_bq(bigquery_client, table_id,
+                       dataset_id, project_id, data)
+
+        return 'ok'
+
+
+def prepare_data(results):
+    """
+    Prepare the data to be inserted to BigQuery
+    """
     fb_source = []
     for item in results:
 
@@ -236,13 +266,65 @@ def get_facebook_data(event, context):
                           'conversions': conversions,
                           'actions': actions
                           })
+    return fb_source
 
-        if exist_dataset_table(bigquery_client, table_id, dataset_id, project_id, schema_facebook_stat, clustering_fields_facebook) == 'ok':
 
-            insert_rows_bq(bigquery_client, table_id,
-                           dataset_id, project_id, fb_source)
+class VideoInsights():
 
-            return 'ok'
+    def __init__(self, account_id, access_token):
+        self.account_id = account_id
+        self.access_token = access_token
+        self.endpoint_url = "https://graph.facebook.com/v11.0"
+        self.metric = "?metric=total_video_views"
+
+    def main_url(self):
+        """ 
+        This function is to get the main endpoint url
+        """
+        return f"{self.endpoint_url}/act_{self.account_id}"
+
+    def add_access_token_to_url(self, url, access_token):
+        """ 
+        Add access token to the URL if it's not already there. 
+        """
+        query_char = "&"
+        if "?" not in url:
+            query_char = "?"
+        return f"{url}{query_char}access_token={access_token}"
+
+    def get_video_insights_ids(self, account_number, limit=100):
+        """ 
+        Get the video insights ids for a given account. 
+        """
+        url = add_access_token_to_url(
+            f'{self.main_url()}/advideos?limit={limit}', self.access_token)
+        print(url)
+        advideos = rq.get(url).json()
+        videos_id = [item["id"] for item in advideos["data"]]
+        while(True):
+            try:
+
+                if "next" in advideos["paging"]:
+                    advideos = rq.get(advideos["paging"]["next"]).json()
+                    videos_id.extend([item["id"] for item in advideos["data"]])
+                else:
+                    break
+            except KeyError:
+                break
+        return videos_id
+
+    def extract_metric_from_video(self, videos_ids):
+        """ 
+        Extract the metric from the video insights. 
+        """
+        for id in videos_ids:
+            url = add_access_token_to_url(
+                f'{self.endpoint_url}/{id}/video_insights{metric}', self.access_token)
+            check = rq.get(url).json()
+            if check_limit(self.account_number, self.access_token) > 75:
+                time.sleep(60)
+            else:
+                pass
 
 
 class SecretManager():
